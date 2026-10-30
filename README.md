@@ -4,9 +4,9 @@
 
 ### Know exactly what was checked before you trust a green light.
 
-**DMsecurity scans a Git commit for known-vulnerable dependencies and leaked secrets, fully offline, and tells you precisely what it covered and what it could not.**
+**DMsecurity scans a Git commit locally for known-vulnerable dependencies and leaked secrets, without sending the code to a remote scanner, and tells you precisely what it covered and what it could not.**
 
-[![CI](https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/actions/workflows/ci.yml/badge.svg)](https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject/actions/workflows/ci.yml)
+[![CI](https://github.com/DiegoMartell/DMsecurity/actions/workflows/ci.yml/badge.svg)](https://github.com/DiegoMartell/DMsecurity/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node.js ≥ 22](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](.nvmrc)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?logo=typescript&logoColor=white)](tsconfig.json)
@@ -32,7 +32,7 @@ It takes one Git commit, copies it into a private snapshot, runs two proven open
 
 > **The one rule:** missing coverage always wins over findings. A scan that could not check everything is never `PASS`.
 
-Everything runs on your machine. No LLM, no cloud, no credentials, no network once the advisory database is downloaded. The report records the commit hash, the scanner versions, the database checksum and every file it skipped, so a human, a Git hook or a CI job can verify the claim instead of trusting it.
+The core scan runs on your machine: it uses no LLM, cloud scanner or credentials, and needs no network after the advisory database is downloaded. WhatsApp alerts are optional and do require a network connection. The report records the commit hash, the scanner versions, the database checksum and every file it skipped, so a human, a Git hook or a CI job can verify the claim instead of trusting it.
 
 ```text
 $ npm run scan -- --repo ~/code/my-app --ref HEAD --out /tmp/my-app-report.json
@@ -90,6 +90,35 @@ flowchart LR
 
 ---
 
+## End-to-end flow
+
+The normal path from installation to an automated check is deliberately explicit:
+
+```mermaid
+flowchart LR
+    A[Install once] --> B[Choose repository and ref]
+    B --> C[Optional: WhatsApp, timer and hook]
+    C --> D[Create immutable local snapshot]
+    D --> E[Run OSV-Scanner and Gitleaks]
+    E --> F{Coverage-first decision}
+    F -->|complete, no findings| G[PASS · report]
+    F -->|findings| H[FINDINGS · report]
+    F -->|missing or failed coverage| I[INCOMPLETE · report]
+    G --> J[Optional local alert or automation]
+    H --> J
+    I --> J
+```
+
+1. **Install once.** `bash scripts/install.sh` requires Node.js 22+ and npm. It installs project dependencies, builds the CLI, downloads the pinned scanner binaries and an offline advisory database, and verifies their checksums. This initial setup needs internet access and is automated only on Linux x86_64.
+2. **Configure deliberately.** The installer opens `dmsecurity onboard`, where you select an existing Git repository and ref. WhatsApp alerts, the administrator chat, a systemd timer and a pre-commit hook are all opt-in; each choice is confirmed before it is enabled.
+3. **Scan a commit, not the working tree.** `dmsecurity scan` resolves the requested ref, copies its blobs to a private temporary snapshot, and runs OSV-Scanner and Gitleaks there. It does not check out or execute code from the repository being reviewed.
+4. **Receive an auditable result.** The command writes a redacted JSON report outside the scanned repository. `PASS` requires complete coverage and zero findings; missing coverage always produces `INCOMPLETE`, even when findings also exist.
+5. **Automate only the parts you choose.** A timer reuses the saved repository and ref, the optional Git hook scans the staged index before a commit, and WhatsApp receives only short redacted summaries. None of these mechanisms commits changes or installs project dependencies automatically.
+
+For a one-off local scan, use `dmsecurity scan`. For guided setup, use `dmsecurity onboard`. For a human at an interactive terminal, running `dmsecurity` with no arguments opens the action menu; scheduled scans and hooks never show that menu.
+
+---
+
 ## Quick start
 
 One command on Linux x86_64 after installing Node 22+ and npm. It downloads
@@ -98,7 +127,7 @@ shows the QR, and can activate periodic checks and the pre-commit hook. Other
 platforms: see [manual setup](#manual-setup) below.
 
 ```bash
-git clone https://github.com/MauDevp/Hackathon_OpenIA_SecurityProject.git dmsecurity
+git clone https://github.com/DiegoMartell/DMsecurity.git dmsecurity
 cd dmsecurity
 bash scripts/install.sh
 ```
@@ -175,7 +204,7 @@ What `bash scripts/install.sh` does, so you can trust it:
 
 ### On your machine: cron or a systemd timer
 
-`scripts/scheduled-scan.sh` scans one repository, keeps every report under `~/.local/state/guardia/<repo>/`, appends a line to `history.log`, and sends a **desktop notification** when the result is `FINDINGS` or `INCOMPLETE`.
+`scripts/scheduled-scan.sh` scans one repository, keeps every report under `~/.local/state/guardia/<repo>/`, appends a line to `history.log`, and sends a **desktop notification** by default when the result is `FINDINGS` or `INCOMPLETE`. Set `GUARDIA_NOTIFY=whatsapp` to queue a redacted WhatsApp alert instead.
 
 ```bash
 # Try it once
@@ -281,7 +310,7 @@ esac
 ## Usage
 
 ```text
-dmsecurity scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline]
+dmsecurity scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offline] [--notify whatsapp] [--notify-on pass,findings,incomplete]
 ```
 
 | Flag | Required | Description |
@@ -290,9 +319,10 @@ dmsecurity scan --repo <path> --ref <git-ref> --out <report.json> [--strict-offl
 | `--ref <git-ref>` | ✔ | Anything `git rev-parse` resolves to a commit: `HEAD`, a branch, a tag, a SHA. |
 | `--out <file>` | ✔ | Where to write the JSON report. **Must be outside the repository.** Written atomically with mode `0600`. |
 | `--strict-offline` | | Fail closed unless network isolation is *verified*. No verification mechanism exists yet, so this flag always yields `INCOMPLETE`. See [Limits](#limits-you-should-know). |
-| `--help`, `-h` | | Print usage. |
+| `--notify whatsapp` | | Send a short, redacted WhatsApp summary after the scan. Requires a linked local session and a configured recipient. |
+| `--notify-on <statuses>` | | Comma-separated notification statuses: `pass`, `findings`, `incomplete`. Defaults to `findings,incomplete`. Requires `--notify whatsapp`. |
 
-Usage errors (unknown flag, missing value, `--out` inside the repo) print a one-line message and exit with code `2`. A ref that does not resolve is not a usage error: DMsecurity still writes an `INCOMPLETE` report and exits `2`.
+Run `dmsecurity --help` or `dmsecurity comandos` for the complete command reference. Usage errors (unknown flag, missing value, `--out` inside the repo) print a one-line message and exit with code `2`. A ref that does not resolve is not a usage error: DMsecurity still writes an `INCOMPLETE` report and exits `2`.
 
 ---
 
@@ -383,7 +413,7 @@ Already have both tools on `PATH`? Skip the first two exports. The adapters were
 ## Running the tests
 
 ```bash
-npm test                        # 58 unit and contract tests, fake scanners, no network
+npm test                        # 86 unit and contract tests, fake scanners, no network
 npm run typecheck               # tsc --noEmit
 GUARDIA_INTEGRATION=1 npm test  # adds 7 tests against the real binaries and database
 ```
